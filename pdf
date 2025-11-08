@@ -1,0 +1,333 @@
+# Rapport de Travail Pratique
+## Communication Inter-Processus via Tubes Nommés (FIFO)
+
+---
+
+## 1. Introduction
+
+### 1.1 Contexte du Projet
+Ce projet implémente un système de communication client-serveur utilisant les tubes nommés (named pipes ou FIFO) sous Linux. L'architecture permet à plusieurs clients de communiquer simultanément avec un serveur central via un mécanisme de questions-réponses asynchrones.
+
+### 1.2 Objectifs
+- Mettre en œuvre la communication inter-processus (IPC) avec les FIFO
+- Gérer les signaux POSIX pour la synchronisation et le contrôle
+- Créer un serveur résistant aux interruptions clavier (SIGINT)
+- Permettre une communication bidirectionnelle entre processus
+
+### 1.3 Technologies Utilisées
+- **Langage** : C (norme C99)
+- **Système** : Linux/UNIX (POSIX)
+- **IPC** : Tubes nommés (mkfifo)
+- **Signaux** : SIGUSR1, SIGTERM, SIGINT
+- **Compilation** : GCC avec Makefile
+
+---
+
+## 2. Architecture du Système
+
+### 2.1 Vue d'Ensemble
+Le système suit une architecture client-serveur avec communication asynchrone :
+
+```
+┌─────────────┐                      ┌─────────────┐
+│   CLIENT 1  │◄────SIGUSR1──────────┤             │
+│  PID: 1234  │                      │             │
+│ /tmp/fifo_  │─────Question────────►│   SERVEUR   │
+│    1234     │◄────Réponse──────────┤  /tmp/fifo_ │
+└─────────────┘                      │   serveur   │
+                                     │             │
+┌─────────────┐                      │  PID: 9999  │
+│   CLIENT 2  │◄────SIGUSR1──────────┤             │
+│  PID: 5678  │                      │             │
+│ /tmp/fifo_  │─────Question────────►│             │
+│    5678     │◄────Réponse──────────┤             │
+└─────────────┘                      └─────────────┘
+```
+
+### 2.2 Composants Principaux
+
+#### 2.2.1 Le Serveur
+- **Rôle** : Écoute en permanence les questions des clients
+- **FIFO** : `/tmp/fifo_serveur` (mode lecture)
+- **Traitement** : Réception → Traitement → Réponse → Notification
+- **Signaux** :
+  - SIGINT (Ctrl+C) : **IGNORÉ** (ininterruptible)
+  - SIGTERM : Arrêt propre avec nettoyage
+
+#### 2.2.2 Le Client
+- **Rôle** : Envoie des questions et attend les réponses
+- **FIFO** : `/tmp/fifo_<PID>` (mode lecture, unique par client)
+- **Interaction** : Ligne de commande interactive
+- **Signaux** :
+  - SIGUSR1 : Notification de réponse disponible
+
+### 2.3 Structures de Données
+
+```c
+/* Question envoyée par le client */
+typedef struct {
+    pid_t pid_client;      // PID pour identifier l'émetteur
+    int numero;            // Numéro aléatoire [1, NMAX]
+    char message[NMAX];    // Contenu de la question
+} Question;
+
+/* Réponse envoyée par le serveur */
+typedef struct {
+    pid_t pid_client;      // PID du destinataire
+    int numero;            // Référence à la question
+    char message[NMAX];    // Contenu de la réponse
+} Reponse;
+```
+
+---
+
+## 3. Protocole de Communication
+
+### 3.1 Séquence d'Initialisation
+
+#### Serveur
+1. Installation des handlers de signaux (SIGINT ignoré, SIGTERM géré)
+2. Création du FIFO serveur (`/tmp/fifo_serveur`)
+3. Ouverture en mode lecture (bloquante)
+4. Attente de connexions clients
+
+#### Client
+1. Installation du handler SIGUSR1
+2. Génération du nom de FIFO unique (`/tmp/fifo_<PID>`)
+3. Création du FIFO client
+4. Ouverture du FIFO serveur en écriture
+5. Ouverture du FIFO client en lecture
+
+### 3.2 Séquence de Communication
+
+```
+CLIENT                          SERVEUR
+  |                               |
+  |----[ Question + PID ]-------->|
+  |                               |
+  |                          [Traitement]
+  |                               |
+  |                          [Ouvre FIFO_<PID>]
+  |                               |
+  |<----[ Réponse ]---------------|
+  |                               |
+  |<----[ SIGUSR1 ]---------------|
+  |                               |
+  [Réveil via signal]             |
+  [Lecture réponse]               |
+  |                               |
+  [Affichage]                     |
+```
+
+### 3.3 Gestion de l'Arrêt
+
+**Client** : Ctrl+D (EOF) → Fermeture propre des FIFOs → Suppression du FIFO client
+
+**Serveur** :
+- Ctrl+C (SIGINT) : **Ignoré** avec message informatif
+- `kill -TERM <PID>` : Fermeture propre → Suppression du FIFO serveur
+
+---
+
+## 4. Implémentation Technique
+
+### 4.1 Gestion des Signaux
+
+#### 4.1.1 Serveur : Résistance aux Interruptions
+Le serveur est conçu pour être **ininterruptible via le clavier** :
+
+```c
+void ignorer_signal(int sig) {
+    printf("\n[SERVEUR] Signal SIGINT ignoré (utilisez 'kill -TERM %d')\n", 
+           getpid());
+}
+
+void installer_handlers_serveur(void) {
+    struct sigaction sa_int;
+    sa_int.sa_handler = ignorer_signal;
+    sigaction(SIGINT, &sa_int, NULL);  // Ctrl+C ignoré
+    
+    struct sigaction sa_term;
+    sa_term.sa_handler = hand_reveil;
+    sigaction(SIGTERM, &sa_term, NULL); // Kill propre uniquement
+}
+```
+
+**Avantages** :
+- Protection contre les arrêts accidentels (Ctrl+C)
+- Arrêt contrôlé uniquement via SIGTERM ou kill
+- Garantit la disponibilité du service
+
+#### 4.1.2 Client : Notification Asynchrone
+```c
+void hand_reveil(int sig) {
+    reponse_recue = 1;  // Variable volatile sig_atomic_t
+}
+
+// Dans la boucle principale
+while (!reponse_recue) {
+    pause();  // Attente passive jusqu'au signal
+}
+```
+
+### 4.2 Gestion des FIFO
+
+#### 4.2.1 Création et Permissions
+```c
+// Création avec permissions 0666 (rw-rw-rw-)
+mkfifo(FIFO_SERVEUR, 0666);
+```
+
+#### 4.2.2 Gestion du Blocage
+**Problème** : `open()` sur un FIFO en lecture bloque jusqu'à ce qu'un écrivain soit connecté.
+
+**Solution serveur** : Acceptée (le serveur attend naturellement des clients)
+
+**Solution client** :
+```c
+// Ouverture non-bloquante puis passage en mode bloquant
+fd = open(fifo_client, O_RDONLY | O_NONBLOCK);
+flags = fcntl(fd, F_GETFL);
+fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+```
+
+#### 4.2.3 Gestion de la Fin de Connexion
+Lorsque tous les clients ferment le FIFO serveur :
+```c
+if (nb_lus == 0) {
+    // EOF : réouverture pour accepter de nouveaux clients
+    close(fd_serveur);
+    fd_serveur = open(FIFO_SERVEUR, O_RDONLY);
+}
+```
+
+### 4.3 Compilation et Déploiement
+
+Le Makefile fournit plusieurs cibles pour faciliter le développement :
+
+```makefile
+make              # Compilation complète
+make test-full    # Test automatique complet
+make start-server # Lance le serveur en arrière-plan
+make stop-server  # Arrête proprement le serveur
+```
+
+---
+
+## 5. Tests et Validation
+
+### 5.1 Tests Unitaires
+
+**Test 1 : Communication simple**
+```bash
+# Terminal 1
+./serveur
+
+# Terminal 2
+./client
+> Question de test
+```
+✓ Réception et réponse correctes
+
+**Test 2 : Multiples clients simultanés**
+```bash
+./client &   # Client 1
+./client &   # Client 2
+./client &   # Client 3
+```
+✓ Le serveur gère les clients concurrents sans blocage
+
+**Test 3 : Résistance aux interruptions**
+```bash
+./serveur
+# Appuyer sur Ctrl+C plusieurs fois
+```
+✓ Message "Signal SIGINT ignoré" affiché
+✓ Le serveur continue de fonctionner
+
+**Test 4 : Arrêt propre**
+```bash
+kill -TERM $(pgrep serveur)
+```
+✓ Message d'arrêt affiché
+✓ FIFO serveur supprimé
+✓ Pas de fichiers orphelins dans /tmp
+
+### 5.2 Tests de Robustesse
+
+| Scénario | Résultat Attendu | Résultat Obtenu |
+|----------|------------------|-----------------|
+| Client sans serveur actif | Erreur à l'ouverture | ✓ Erreur gérée |
+| Arrêt brutal client (kill -9) | FIFO client orphelin | ⚠ Nécessite nettoyage manuel |
+| Redémarrage serveur rapide | Erreur "Address already in use" | ✓ unlink() en début résout |
+| Message > NMAX | Troncature | ✓ Troncature à NMAX-1 |
+
+---
+
+## 6. Limitations et Améliorations Possibles
+
+### 6.1 Limitations Actuelles
+
+1. **Pas de gestion de file d'attente prioritaire** : Les questions sont traitées dans l'ordre d'arrivée (FIFO simple)
+
+2. **Pas de timeout** : Si un client plante, son FIFO reste dans `/tmp`
+
+3. **Pas d'authentification** : N'importe quel processus peut se connecter
+
+4. **Pas de chiffrement** : Les messages transitent en clair
+
+5. **Limite de taille** : Messages limités à NMAX (256 caractères)
+
+### 6.2 Améliorations Proposées
+
+#### 6.2.1 Nettoyage automatique des FIFO orphelins
+```c
+// Au démarrage du serveur
+system("rm -f /tmp/fifo_* 2>/dev/null");
+```
+
+#### 6.2.2 Timeout sur les réponses
+```c
+struct timespec timeout = {5, 0};  // 5 secondes
+sigtimedwait(&set, NULL, &timeout);
+```
+
+#### 6.2.3 Protocole étendu
+Ajout de types de messages (CONNECT, DISCONNECT, PING, etc.)
+
+#### 6.2.4 Logging
+Enregistrement des transactions dans un fichier log avec horodatage
+
+---
+
+## 7. Conclusion
+
+### 7.1 Objectifs Atteints
+✓ Communication client-serveur fonctionnelle via FIFO  
+✓ Gestion correcte des signaux (SIGUSR1, SIGTERM)  
+✓ Serveur ininterruptible par Ctrl+C (SIGINT ignoré)  
+✓ Support de clients multiples simultanés  
+✓ Nettoyage propre des ressources  
+
+### 7.2 Compétences Développées
+- Maîtrise des tubes nommés (FIFO) sous Linux
+- Gestion avancée des signaux POSIX
+- Programmation système en C
+- Synchronisation inter-processus
+- Débogage de communications asynchrones
+
+### 7.3 Perspectives
+Ce projet constitue une base solide pour des applications plus complexes telles que :
+- Serveurs de messagerie
+- Systèmes de logs centralisés
+- Contrôleurs de processus distribués
+- Middleware de communication légère
+
+L'utilisation des FIFO offre une alternative simple et performante aux sockets pour la communication inter-processus locale, avec un overhead minimal et une intégration naturelle au système de fichiers UNIX.
+
+---
+
+**Auteur** : [Votre Nom]  
+**Date** : Novembre 2025  
+**Module** : Systèmes d'Exploitation / Programmation Système  
+**Encadrant** : [Nom de l'enseignant]
