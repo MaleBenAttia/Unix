@@ -2,11 +2,10 @@
 #define HANDLERS_SERV_H
 
 #include <signal.h>
+#include <unistd.h>
+#include <stdio.h>
 
-/* Handler pour gérer la fin du serveur (SIGINT, SIGTERM) */
 void hand_reveil(int sig);
-
-/* Fonction pour installer les handlers de signaux du serveur */
-void installer_handlers_serveur(void);
+void hand_immortel(int sig);
 
 #endif

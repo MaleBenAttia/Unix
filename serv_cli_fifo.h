@@ -1,29 +1,34 @@
 #ifndef SERV_CLI_FIFO_H
 #define SERV_CLI_FIFO_H
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <signal.h>
+#include <unistd.h>
 #include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <string.h>
 
-/* Taille maximale des messages */
-#define NMAX 256
+#define NMAX 100
+#define FIFO1 "fifo1"
+#define FIFO2 "fifo2"
 
-/* Nom du tube nommé du serveur */
-#define FIFO_SERVEUR "/tmp/fifo_serveur"
-
-/* Format pour les tubes nommés des clients : /tmp/fifo_<PID> */
-#define FIFO_CLIENT_FORMAT "/tmp/fifo_%d"
-
-/* Structure représentant une question envoyée par un client */
+/* Structure pour une question */
 typedef struct {
-    pid_t pid_client;        /* PID du client émetteur */
-    int numero;              /* Numéro tiré au sort (entre 1 et NMAX) */
-    char message[NMAX];      /* Message/question du client */
+    pid_t pid_client;
+    int nombre;
 } Question;
 
-/* Structure représentant une réponse envoyée par le serveur */
+/* Structure pour une réponse */
 typedef struct {
-    pid_t pid_client;        /* PID du client destinataire */
-    int numero;              /* Numéro de la question */
-    char message[NMAX];      /* Réponse du serveur */
+    pid_t pid_client;
+    int taille;
+    int valeurs[NMAX];
 } Reponse;
+
+/* Prototypes communs */
+void generer_nombres_aleatoires(Reponse *rep, int n);
+void fin_serveur();
 
 #endif
